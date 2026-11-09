@@ -104,12 +104,83 @@ contract RebaseToken is ERC20 {
     }
 
     /**
+        * @notice Gets the principle balance of a user (tokens actually minted to them), excluding any accrued interest.
+        * @param _user The address of the user.
+        * @return The principle balance of the user.
+    */
+    function principleBalanceOf(address _user) external view returns (uint256) {
+        return super.balanceOf(_user); // Calls ERC20.balanceOf, which returns _balances[_user]
+    }
+
+    /**
+        * @notice Transfers tokens from the caller to a recipient.
+        * Accrued interest for both sender and recipient is minted before the transfer.
+        * If the recipient is new, they inherit the sender's interest rate.
+        * @param _recipient The address to transfer tokens to.
+        * @param _amount The amount of tokens to transfer. Can be type(uint256).max to transfer full balance.
+        * @return A boolean indicating whether the operation succeeded.
+    */
+    function transfer(address _recipient, uint256 _amount) public override returns (bool) {
+        // 1. Mint accrued interest for both sender and recipient
+        _mintAccruedInterest(msg.sender);
+        _mintAccruedInterest(_recipient);
+
+        // 2. Handle request to transfer maximum balance
+        if (_amount == type(uint256).max)
+            _amount = balanceOf(msg.sender); // Use the interest-inclusive balance
+
+        // 3. Set recipient's interest rate if they are new (balance is checked *before* super.transfer)
+        // We use balanceOf here to check the effective balance including any just-minted interest.
+        // If _mintAccruedInterest made their balance non-zero, but they had 0 principle, this still means they are "new" for rate setting.
+        // A more robust check for "newness" for rate setting might be super.balanceOf(_recipient) == 0 before any interest minting for the recipient.
+        // However, the current logic is: if their *effective* balance is 0 before the main transfer part, they get the sender's rate.
+        if (balanceOf(_recipient) == 0 && _amount > 0) {
+            // Ensure _amount > 0 to avoid setting rate on 0-value initial transfer
+            sUserInterestRate[_recipient] = sUserInterestRate[msg.sender];
+        }
+
+        return super.transfer(_recipient, _amount);
+    }
+
+    /**
+        * @notice Transfers tokens from one address to another, on behalf of the sender,
+        * provided an allowance is in place.
+        * Accrued interest for both sender and recipient is minted before the transfer.
+        * If the recipient is new, they inherit the sender's interest rate.
+        * @param _sender The address to transfer tokens from.
+        * @param _recipient The address to transfer tokens to.
+        * @param _amount The amount of tokens to transfer. Can be type(uint256).max to transfer full balance.
+        * @return A boolean indicating whether the operation succeeded.
+    */
+    function transferFrom(address _sender, address _recipient, uint256 _amount) public override returns (bool) {
+        _mintAccruedInterest(_sender);
+        _mintAccruedInterest(_recipient);
+
+        if (_amount == type(uint256).max)
+            _amount = balanceOf(_sender); // Use the interest-inclusive balance of the _sender
+
+        // Set recipient's interest rate if they are new
+        if (balanceOf(_recipient) == 0 && _amount > 0)
+            sUserInterestRate[_recipient] = sUserInterestRate[_sender];
+
+        return super.transferFrom(_sender, _recipient, _amount);
+    }
+
+    /**
         * @notice Gets the locked-in interest rate for a specific user.
         * @param _user The address of the user.
         * @return The user's specific interest rate.
     */
     function getUserInterestRate(address _user) external view returns (uint256) {
         return sUserInterestRate[_user];
+    }
+
+    /**
+        * @notice Gets the current global interest rate for the token.
+        * @return The current global interest rate.
+    */
+    function getInterestRate() external view returns (uint256) {
+        return sInterestRate;
     }
 
     /**
@@ -145,8 +216,8 @@ contract RebaseToken is ERC20 {
         if(timeElapsed == 0 || sUserInterestRate[_user] == 0) return PRECISION_FACTOR;
 
         // 2. Calculate the total fractional interest accrued: UserInterestRate * TimeElapsed.
-        // s_userInterestRate[_user] is the rate per second.
-        // This product is already scaled appropriately if s_userInterestRate is stored scaled.
+        // sUserInterestRate[_user] is the rate per second.
+        // This product is already scaled appropriately if sUserInterestRate is stored scaled.
         uint256 fractionalInterest = sUserInterestRate[_user] * timeElapsed;
 
         // 3. The growth factor is (1 + fractional_interest_part).
